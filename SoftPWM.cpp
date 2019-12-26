@@ -51,6 +51,11 @@
  #include <WProgram.h>
 #endif
 
+// TODO: many other modern boards need 32 bit register access...
+#if defined(__IMXRT1062__)
+ #define OUTPORT_32BITS
+#endif
+
 #if F_CPU
 #define SOFTPWM_FREQ 60UL
 #define SOFTPWM_OCR (F_CPU/(8UL*256UL*SOFTPWM_FREQ))
@@ -67,8 +72,13 @@ typedef struct
   // hardware I/O port and pin for this channel
   int8_t pin;
   uint8_t polarity;
+#ifdef OUTPORT_32BITS
+  volatile uint32_t *outport;
+  uint32_t pinmask;
+#else
   volatile uint8_t *outport;
   uint8_t pinmask;
+#endif
   uint8_t pwmvalue;
   uint8_t checkval;
   uint8_t fadeuprate;
