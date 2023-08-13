@@ -57,7 +57,7 @@
 #endif
 
 #if F_CPU
-#define SOFTPWM_FREQ 60UL
+#define SOFTPWM_FREQ 200UL
 #define SOFTPWM_OCR (F_CPU/(8UL*256UL*SOFTPWM_FREQ))
 #else
 // 130 == 60 Hz (on 16 MHz part)
