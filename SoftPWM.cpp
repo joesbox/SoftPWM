@@ -6,21 +6,21 @@
 ||
 || @description
 || | A Software PWM Library
-|| | 
+|| |
 || | Written by Brett Hagman
 || | http://www.roguerobotics.com/
 || | bhagman@roguerobotics.com, bhagman@wiring.org.co
 || |
 || | A Wiring (and Arduino) Library, for Atmel AVR8 bit series microcontrollers,
 || | to produce PWM signals on any arbitrary pin.
-|| | 
+|| |
 || | It was originally designed for controlling the brightness of LEDs, but
 || | could be adapted to control servos and other low frequency PWM controlled
 || | devices as well.
-|| | 
+|| |
 || | It uses a single hardware timer (Timer 2) on the Atmel microcontroller to
 || | generate up to 20 PWM channels (your mileage may vary).
-|| | 
+|| |
 || #
 ||
 || @license Please see the accompanying LICENSE.txt file for this project.
@@ -44,33 +44,40 @@
 #include "SoftPWM_timer.h"
 
 #if defined(WIRING)
- #include <Wiring.h>
+#include <Wiring.h>
 #elif ARDUINO >= 100
- #include <Arduino.h>
+#include <Arduino.h>
 #else
- #include <WProgram.h>
+#include <WProgram.h>
 #endif
 
 // TODO: many other modern boards need 32 bit register access...
 #if defined(__IMXRT1062__)
- #define OUTPORT_32BITS
+#define OUTPORT_32BITS
 #endif
 
 #if F_CPU
 #define SOFTPWM_FREQ 200UL
-#define SOFTPWM_OCR (F_CPU/(8UL*256UL*SOFTPWM_FREQ))
+#define SOFTPWM_OCR (F_CPU / (8UL * 256UL * SOFTPWM_FREQ))
 #else
 // 130 == 60 Hz (on 16 MHz part)
 #define SOFTPWM_OCR 130
 #endif
 
 volatile uint8_t _isr_softcount = 0xff;
+volatile uint8_t _analog_softcount = 0;
+volatile uint8_t _analog_sample = 0;
 uint8_t _softpwm_defaultPolarity = SOFTPWM_NORMAL;
+
+ADC *adc = new ADC();
 
 typedef struct
 {
   // hardware I/O port and pin for this channel
   int8_t pin;
+  int8_t analogReadbackPin;
+  uint8_t analogReadbackDelay;
+  int analogValue[SOFTPWM_ANALOG_SAMPLES];
   uint8_t polarity;
 #ifdef OUTPORT_32BITS
   volatile uint32_t *outport;
@@ -87,7 +94,6 @@ typedef struct
 
 softPWMChannel _softpwm_channels[SOFTPWM_MAXCHANNELS];
 
-
 // Here is the meat and gravy
 #ifdef WIRING
 void SoftPWM_Timer_Interrupt(void)
@@ -99,7 +105,7 @@ ISR(SOFTPWM_TIMER_INTERRUPT)
   int16_t newvalue;
   int16_t direction;
 
-  if(++_isr_softcount == 0)
+  if (++_isr_softcount == 0)
   {
     // set all channels high - let's start again
     // and accept new checkvals
@@ -128,26 +134,40 @@ ISR(SOFTPWM_TIMER_INTERRUPT)
 
         _softpwm_channels[i].checkval = newvalue;
       }
-      else  // just set the channel to the new value
+      else // just set the channel to the new value
         _softpwm_channels[i].checkval = _softpwm_channels[i].pwmvalue;
 
       // now set the pin high (if not 0)
-      if (_softpwm_channels[i].checkval > 0)  // don't set if checkval == 0
+      if (_softpwm_channels[i].checkval > 0) // don't set if checkval == 0
       {
         if (_softpwm_channels[i].polarity == SOFTPWM_NORMAL)
           *_softpwm_channels[i].outport |= _softpwm_channels[i].pinmask;
         else
           *_softpwm_channels[i].outport &= ~(_softpwm_channels[i].pinmask);
       }
-
     }
   }
 
   for (i = 0; i < SOFTPWM_MAXCHANNELS; i++)
   {
-    if (_softpwm_channels[i].pin >= 0)  // if it's a valid pin
+    if (_softpwm_channels[i].pin >= 0) // if it's a valid pin
     {
-      if (_softpwm_channels[i].checkval == _isr_softcount)  // if we have hit the width
+      if (_analog_softcount == SOFTPWM_ANALOG) // If we have hit the analog read period
+      {
+        if (_softpwm_channels[i].analogReadbackDelay == _isr_softcount) // And we have hit the analog read back delay
+        {
+          _softpwm_channels[i].analogValue[_analog_sample] = adc->analogRead(_softpwm_channels[i].analogReadbackPin);
+          _analog_softcount = 0;
+          _analog_sample++;
+
+          if (_analog_sample == SOFTPWM_ANALOG_SAMPLES)
+          {
+            _analog_sample = 0;
+          }
+        }
+      }
+
+      if (_softpwm_channels[i].checkval == _isr_softcount) // if we have hit the width
       {
         // turn off the channel
         if (_softpwm_channels[i].polarity == SOFTPWM_NORMAL)
@@ -156,10 +176,14 @@ ISR(SOFTPWM_TIMER_INTERRUPT)
           *_softpwm_channels[i].outport |= _softpwm_channels[i].pinmask;
       }
     }
-  }  
+  }
+
+  // Increment the analog soft counter
+  if (_isr_softcount == 255)
+  {
+    _analog_softcount++;
+  }
 }
-
-
 
 void SoftPWMBegin(uint8_t defaultPolarity)
 {
@@ -173,7 +197,7 @@ void SoftPWMBegin(uint8_t defaultPolarity)
   uint8_t i;
 
 #ifdef WIRING
-  Timer2.setMode(0b010);  // CTC
+  Timer2.setMode(0b010); // CTC
   Timer2.setClockSource(CLOCK_PRESCALE_8);
   Timer2.setOCR(CHANNEL_A, SOFTPWM_OCR);
   Timer2.attachInterrupt(INTERRUPT_COMPARE_MATCH_A, SoftPWM_Timer_Interrupt);
@@ -181,11 +205,11 @@ void SoftPWMBegin(uint8_t defaultPolarity)
   SOFTPWM_TIMER_INIT(SOFTPWM_OCR);
 #endif
 
-
-
   for (i = 0; i < SOFTPWM_MAXCHANNELS; i++)
   {
     _softpwm_channels[i].pin = -1;
+    _softpwm_channels[i].analogReadbackPin = -1;
+    _softpwm_channels[i].analogReadbackDelay = -1;
     _softpwm_channels[i].polarity = SOFTPWM_NORMAL;
     _softpwm_channels[i].outport = 0;
     _softpwm_channels[i].fadeuprate = 0;
@@ -193,8 +217,11 @@ void SoftPWMBegin(uint8_t defaultPolarity)
   }
 
   _softpwm_defaultPolarity = defaultPolarity;
-}
 
+  // Set the ADC to high speed
+  adc->adc0->setConversionSpeed(ADC_CONVERSION_SPEED::HIGH_SPEED);
+  adc->adc1->setConversionSpeed(ADC_CONVERSION_SPEED::HIGH_SPEED);
+}
 
 void SoftPWMSetPolarity(int8_t pin, uint8_t polarity)
 {
@@ -206,23 +233,21 @@ void SoftPWMSetPolarity(int8_t pin, uint8_t polarity)
   for (i = 0; i < SOFTPWM_MAXCHANNELS; i++)
   {
     if ((pin < 0 && _softpwm_channels[i].pin >= 0) ||  // ALL pins
-       (pin >= 0 && _softpwm_channels[i].pin == pin))  // individual pin
+        (pin >= 0 && _softpwm_channels[i].pin == pin)) // individual pin
     {
       _softpwm_channels[i].polarity = polarity;
     }
   }
 }
 
-
-void SoftPWMSetPercent(int8_t pin, uint8_t percent, uint8_t hardset)
+void SoftPWMSetPercent(int8_t pin, int8_t analogReadbackPin, uint8_t analogReadbackDelay, uint8_t percent, uint8_t hardset)
 {
-  SoftPWMSet(pin, ((uint16_t)percent * 255) / 100, hardset);
+  SoftPWMSet(pin, analogReadbackPin, ((uint16_t)analogReadbackDelay * 255) / 100, ((uint16_t)percent * 255) / 100, hardset);
 }
 
-
-void SoftPWMSet(int8_t pin, uint8_t value, uint8_t hardset)
+void SoftPWMSet(int8_t pin, int8_t analogReadbackPin, uint8_t analogReadbackDelay, uint8_t value, uint8_t hardset)
 {
-  int8_t firstfree = -1;  // first free index
+  int8_t firstfree = -1; // first free index
   uint8_t i;
 
   if (hardset)
@@ -235,7 +260,7 @@ void SoftPWMSet(int8_t pin, uint8_t value, uint8_t hardset)
   for (i = 0; i < SOFTPWM_MAXCHANNELS; i++)
   {
     if ((pin < 0 && _softpwm_channels[i].pin >= 0) ||  // ALL pins
-       (pin >= 0 && _softpwm_channels[i].pin == pin))  // individual pin
+        (pin >= 0 && _softpwm_channels[i].pin == pin)) // individual pin
     {
       // set the pin (and exit, if individual pin)
       _softpwm_channels[i].pwmvalue = value;
@@ -253,12 +278,14 @@ void SoftPWMSet(int8_t pin, uint8_t value, uint8_t hardset)
   {
     // we have a free pin we can use
     _softpwm_channels[firstfree].pin = pin;
+    _softpwm_channels[firstfree].analogReadbackPin = analogReadbackPin;
+    _softpwm_channels[firstfree].analogReadbackDelay = analogReadbackDelay;
     _softpwm_channels[firstfree].polarity = _softpwm_defaultPolarity;
     _softpwm_channels[firstfree].outport = portOutputRegister(digitalPinToPort(pin));
     _softpwm_channels[firstfree].pinmask = digitalPinToBitMask(pin);
     _softpwm_channels[firstfree].pwmvalue = value;
-//    _softpwm_channels[firstfree].checkval = 0;
-    
+    //    _softpwm_channels[firstfree].checkval = 0;
+
     // now prepare the pin for output
     // turn it off to start (no glitch)
     if (_softpwm_defaultPolarity == SOFTPWM_NORMAL)
@@ -276,18 +303,17 @@ void SoftPWMEnd(int8_t pin)
   for (i = 0; i < SOFTPWM_MAXCHANNELS; i++)
   {
     if ((pin < 0 && _softpwm_channels[i].pin >= 0) ||  // ALL pins
-       (pin >= 0 && _softpwm_channels[i].pin == pin))  // individual pin
+        (pin >= 0 && _softpwm_channels[i].pin == pin)) // individual pin
     {
       // now disable the pin (put it into INPUT mode)
       digitalWrite(_softpwm_channels[i].pin, 1);
       pinMode(_softpwm_channels[i].pin, INPUT);
 
-      // remove the pin
+      // Remove the pin
       _softpwm_channels[i].pin = -1;
     }
   }
 }
-
 
 void SoftPWMSetFadeTime(int8_t pin, uint16_t fadeUpTime, uint16_t fadeDownTime)
 {
@@ -297,7 +323,7 @@ void SoftPWMSetFadeTime(int8_t pin, uint16_t fadeUpTime, uint16_t fadeDownTime)
   for (i = 0; i < SOFTPWM_MAXCHANNELS; i++)
   {
     if ((pin < 0 && _softpwm_channels[i].pin >= 0) ||  // ALL pins
-       (pin >= 0 && _softpwm_channels[i].pin == pin))  // individual pin
+        (pin >= 0 && _softpwm_channels[i].pin == pin)) // individual pin
     {
 
       fadeAmount = 0;
@@ -312,8 +338,39 @@ void SoftPWMSetFadeTime(int8_t pin, uint16_t fadeUpTime, uint16_t fadeDownTime)
 
       _softpwm_channels[i].fadedownrate = fadeAmount;
 
-      if (pin >= 0)  // we've set individual pin
+      if (pin >= 0) // we've set individual pin
         break;
     }
   }
+}
+
+int SoftPWMGetAnalog(uint8_t pin)
+{
+  int analog = 0;
+
+  uint8_t validSamples = 0;
+
+  float meanSampleValue = 0.0f;
+
+  int sampleSum = 0;
+
+  for (int i = 0; i < SOFTPWM_MAXCHANNELS; i++)
+  {
+    if (_softpwm_channels[i].pin == pin)
+    {
+      for (int j = 0; j < SOFTPWM_ANALOG_SAMPLES; j++)
+      {
+        if (_softpwm_channels[i].analogValue[j] != 0)
+        {
+          sampleSum += _softpwm_channels[i].analogValue[j];
+          validSamples++;
+        }
+      }
+    }
+  }
+
+  meanSampleValue = sampleSum / validSamples;
+
+  analog = meanSampleValue;
+  return analog;
 }
